@@ -1,0 +1,35 @@
+name: Sync Spond events to Google Calendar
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub may delay this slightly under load; that's fine
+    # for a calendar sync. Adjust the cron expression if you want a different
+    # cadence (this is UTC time).
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          SPOND_USERNAME: ${{ secrets.SPOND_USERNAME }}
+          SPOND_PASSWORD: ${{ secrets.SPOND_PASSWORD }}
+          SPOND_GROUP_ID: ${{ secrets.SPOND_GROUP_ID }}
+          SPOND_SUBGROUP_ID: ${{ secrets.SPOND_SUBGROUP_ID }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EVENT_TIMEZONE: "Europe/Oslo"
+        run: python sync.py
