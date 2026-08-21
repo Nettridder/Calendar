@@ -6,9 +6,8 @@ SPOND_PASSWORD=Doibf34!
 SPOND_GROUP_ID=E9A3343236724B35BB4578CDBDF941AF
 SPOND_SUBGROUP_ID=
 GOOGLE_CALENDAR_ID=c_0940bdcp377it1bnhcbhtq4a20@group.calendar.google.com
-# No Google credential goes in this file. For local testing, run:
-#   gcloud auth application-default login --impersonate-service-account=<sa-email>
-# first, and the script will pick that up automatically.
+# Paste the *entire* contents of your service account JSON key file on one line here
+GOOGLE_SERVICE_ACCOUNT_JSON={"type": "service_account", "...": "..."}
 EVENT_TIMEZONE=Europe/Oslo
 LOOKBACK_DAYS=1
 LOOKAHEAD_DAYS=120

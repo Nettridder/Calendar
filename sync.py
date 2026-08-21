@@ -16,10 +16,16 @@ script creates, so no separate database/state file is needed - each run
 reconciles itself against whatever is currently on the calendar.
 
 Required environment variables:
-  SPOND_USERNAME              Spond login email
-  SPOND_PASSWORD              Spond login password
-  GOOGLE_CALENDAR_ID          Target Google Calendar ID (e.g. xxxx@group.calendar.google.com)
-  GOOGLE_SERVICE_ACCOUNT_JSON Full JSON key for a Google service account, as a raw string
+  SPOND_USERNAME       Spond login email
+  SPOND_PASSWORD       Spond login password
+  GOOGLE_CALENDAR_ID   Target Google Calendar ID (e.g. xxxx@group.calendar.google.com)
+
+Google authentication is picked up automatically via Application Default
+Credentials (ADC) - no key file needed. In GitHub Actions this is set up by
+the google-github-actions/auth step (Workload Identity Federation) before
+this script runs. For local testing, run
+`gcloud auth application-default login --impersonate-service-account=<sa-email>`
+first (see README).
 
 Optional environment variables:
   SPOND_GROUP_ID       Restrict to one Spond group (recommended; see list_groups.py)
@@ -38,7 +44,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-from google.oauth2 import service_account
+import google.auth
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -159,7 +165,6 @@ def main() -> None:
     group_id = env("SPOND_GROUP_ID")
     subgroup_id = env("SPOND_SUBGROUP_ID")
     calendar_id = env("GOOGLE_CALENDAR_ID", required=True)
-    service_account_json = env("GOOGLE_SERVICE_ACCOUNT_JSON", required=True)
     tz_name = env("EVENT_TIMEZONE", "Europe/Oslo")
     lookback_days = int(env("LOOKBACK_DAYS", "1"))
     lookahead_days = int(env("LOOKAHEAD_DAYS", "120"))
@@ -189,20 +194,10 @@ def main() -> None:
 
     active_spond_events = {e["id"]: e for e in spond_events if not is_cancelled(e)}
 
-    import json
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as key_file:
-        key_file.write(service_account_json)
-        key_path = key_file.name
-    try:
-        credentials = service_account.Credentials.from_service_account_file(
-            key_path, scopes=SCOPES
-        )
-    finally:
-        os.unlink(key_path)
+    # Application Default Credentials: picks up the Workload Identity
+    # Federation credentials the auth step exports in CI, or whatever
+    # `gcloud auth application-default login` set up locally.
+    credentials, _ = google.auth.default(scopes=SCOPES)
 
     service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
