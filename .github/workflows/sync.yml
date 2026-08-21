@@ -2,9 +2,6 @@ name: Sync Spond events to Google Calendar
 
 on:
   schedule:
-    # Every 30 minutes. GitHub may delay this slightly under load; that's fine
-    # for a calendar sync. Adjust the cron expression if you want a different
-    # cadence (this is UTC time).
     - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
@@ -13,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: "read"
-      id-token: "write"  # required so this job can request a Google OIDC token
+      id-token: "write"
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -40,9 +37,6 @@ jobs:
           SPOND_GROUP_ID: ${{ secrets.SPOND_GROUP_ID }}
           SPOND_SUBGROUP_ID: ${{ secrets.SPOND_SUBGROUP_ID }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
-          # Domain-wide delegation (recommended for a Workspace-owned calendar -
-          # bypasses external-sharing restrictions entirely). Leave both unset
-          # to fall back to plain calendar sharing instead.
           GOOGLE_DELEGATED_USER: ${{ secrets.GOOGLE_DELEGATED_USER }}
           GOOGLE_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
           EVENT_TIMEZONE: "Europe/Oslo"
