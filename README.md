@@ -54,14 +54,80 @@ token on every run, and no long-lived secret ever exists to leak.
    Note its email address (looks like
    `spond-calendar-sync@your-project.iam.gserviceaccount.com`) — you will
    **not** create a key for it.
-4. In Google Calendar, open the settings of the calendar you want events to
-   land in (the shared org calendar people already subscribe to) → **Share
-   with specific people** → add the service account's email → give it
-   **Make changes to events** permission.
-5. In the same settings page, scroll to **Integrate calendar** and copy the
+4. Decide how the service account will get write access to the calendar —
+   see **2a** vs **2b** below before continuing, since this determines what
+   you do next. If the calendar lives inside a Google Workspace
+   organization (a calendar owned by an `@yourdomain` account, like this
+   one), use **2a**. If it's a calendar on a plain personal Gmail account,
+   use **2b**.
+5. In the calendar's settings page (Settings → your calendar → scroll to
+   **Integrate calendar**), copy the
    **Calendar ID** (for a dedicated calendar it looks like
    `xxxxxxxx@group.calendar.google.com`; for someone's personal calendar it's
    their email address).
+
+### 2a. Workspace calendar → domain-wide delegation (recommended for this case)
+
+Google Workspace organizations have a separate, org-wide cap on what
+*external* accounts (like this service account) are allowed to do with
+calendars owned inside the organization — and on many Workspace domains,
+especially newly created ones, that cap silently overrides any per-calendar
+"Make changes to events" permission you try to grant, even after raising
+the org's external sharing setting. Domain-wide delegation avoids the whole
+problem: instead of the service account acting as an *outside collaborator*
+on the calendar, it acts *as* an existing member of your organization who
+already owns/can edit the calendar (e.g. `nettridder@armeriddere.no`) — so
+none of the external-sharing rules apply.
+
+1. In the Cloud Console, open your service account (IAM & Admin → Service
+   Accounts → click it) → **Details** tab → copy its **Unique ID** (a long
+   number). This is the "Client ID" Workspace needs.
+2. In Cloud Shell, grant the service account permission to sign tokens as
+   itself (needed for delegation to work without a key file):
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     spond-calendar-sync@${PROJECT_ID}.iam.gserviceaccount.com \
+     --project="$PROJECT_ID" \
+     --role="roles/iam.serviceAccountTokenCreator" \
+     --member="serviceAccount:spond-calendar-sync@${PROJECT_ID}.iam.gserviceaccount.com"
+   ```
+
+3. In the Workspace **Admin console** (admin.google.com, as a super admin):
+   Security → Access and data control → API controls → **Domain-wide
+   delegation** → **Add new**. Paste the Unique ID from step 1 as the
+   Client ID, and for OAuth scopes enter exactly:
+
+   ```
+   https://www.googleapis.com/auth/calendar.events
+   ```
+
+   Click Authorize.
+
+   Be aware this scope lets the service account manage *events* (not
+   calendar settings/sharing/deletion of the calendar itself) on behalf of
+   **any** user in your Workspace, not just one calendar's owner — that's
+   how domain-wide delegation works. Keeping the scope to `calendar.events`
+   rather than the broader `calendar` scope limits what it can actually do.
+4. Add a `GOOGLE_DELEGATED_USER` secret in step 4 below set to the email of
+   the Workspace user who owns (or can already edit) the target calendar —
+   e.g. `nettridder@armeriddere.no`. You do **not** need to share the
+   calendar with the service account at all with this approach; if you'd
+   already added it under "Share with specific people" while troubleshooting,
+   feel free to remove that entry.
+
+### 2b. Personal/non-Workspace calendar → direct sharing
+
+If the calendar isn't inside a Google Workspace organization, domain-wide
+delegation isn't available (it's a Workspace-only feature) — share the
+calendar directly instead:
+
+In Google Calendar, open the settings of the calendar you want events to
+land in → **Share with specific people** → add the service account's email
+→ set its permission to **Make changes to events**. Leave the
+`GOOGLE_DELEGATED_USER` secret in step 4 unset; `sync.py` falls back to
+this method automatically when that secret isn't present.
+
 6. Open **Cloud Shell** in the Google Cloud Console (the `>_` icon top
    right) — no local install needed — and run the following, replacing the
    placeholders (`PROJECT_ID` is shown at the top of the console;
@@ -132,6 +198,7 @@ repository secret. Add each of these:
 | `GCP_PROJECT_ID` | your Google Cloud project ID |
 | `GCP_SERVICE_ACCOUNT_EMAIL` | the service account's email from step 2 |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | the provider resource name printed at the end of step 2's Cloud Shell commands |
+| `GOOGLE_DELEGATED_USER` | only if you did **2a**: the Workspace user email to impersonate (e.g. `nettridder@armeriddere.no`). Leave unset for **2b**. |
 
 No key file or password for Google goes anywhere here — that's the point of
 Workload Identity Federation.
@@ -169,6 +236,14 @@ python3 sync.py
 (The `add-iam-policy-binding` command only needs to be run once — it's what
 lets your own account temporarily borrow the service account's identity.)
 
+If you're using domain-wide delegation (**2a**), also set
+`GOOGLE_DELEGATED_USER` and `GOOGLE_SERVICE_ACCOUNT_EMAIL` in your `.env`
+before running — the impersonation used above for local testing is a
+different mechanism from domain-wide delegation, but calling the
+`signJwt` API still works fine through it as long as your own account also
+has `roles/iam.serviceAccountTokenCreator` on the service account (the
+command above already grants that).
+
 With `DRY_RUN=1` it prints what it *would* create/update/delete without
 touching the calendar. Set `DRY_RUN=0` (or remove it) once you're happy.
 
@@ -192,8 +267,20 @@ so very old events aren't repeatedly checked.
 
 - **"Missing required environment variable"** — a secret name doesn't match
   what `sync.py` expects; check the table above for exact spelling.
-- **403 errors from the Calendar API** — the service account email hasn't
-  been shared on the calendar with "Make changes to events" permission.
+- **403 "You need to have writer access to this calendar" (route 2b)** — the
+  service account email hasn't been shared on the calendar with "Make
+  changes to events" permission, or (very common on Workspace-owned
+  calendars) your organization's external sharing cap silently overrides
+  that permission even after you set it. If the calendar is inside a
+  Workspace org, switch to route **2a** (domain-wide delegation) instead of
+  continuing to fight that setting.
+- **403 errors with domain-wide delegation (route 2a)** — double check: the
+  scope authorized in the Admin console is exactly
+  `https://www.googleapis.com/auth/calendar.events` (typos aren't caught
+  until run time), the service account has `roles/iam.serviceAccountTokenCreator`
+  on itself, and `GOOGLE_DELEGATED_USER` is a real user in your Workspace
+  who actually has edit access to that calendar. Admin console delegation
+  changes can take a few minutes to propagate.
 - **`google.auth.exceptions.DefaultCredentialsError` in GitHub Actions** —
   the `google-github-actions/auth` step didn't run before `sync.py`, or one
   of `GCP_PROJECT_ID` / `GCP_SERVICE_ACCOUNT_EMAIL` / `GCP_WORKLOAD_IDENTITY_PROVIDER`

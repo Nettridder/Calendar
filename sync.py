@@ -27,14 +27,29 @@ this script runs. For local testing, run
 `gcloud auth application-default login --impersonate-service-account=<sa-email>`
 first (see README).
 
+If GOOGLE_DELEGATED_USER is set, the script instead uses domain-wide
+delegation: it signs a short-lived JWT as the service account (via the IAM
+Credentials API - still no key file) asserting it wants to act as that
+Workspace user, and exchanges it for an access token. This is the more
+reliable option for a calendar owned inside a Google Workspace organization,
+since it bypasses per-calendar "external sharing" restrictions entirely
+(the service account acts *as* an existing member of your organization,
+rather than as an outside collaborator). See README for the one-time setup
+in the Workspace Admin console.
+
 Optional environment variables:
-  SPOND_GROUP_ID       Restrict to one Spond group (recommended; see list_groups.py)
-  SPOND_SUBGROUP_ID    Restrict further to one subgroup within that group
-  LOOKBACK_DAYS        How many days into the past to reconcile (default 1)
-  LOOKAHEAD_DAYS       How many days into the future to reconcile (default 120)
-  EVENT_TIMEZONE       IANA timezone for events without one baked in (default Europe/Oslo)
-  MAX_EVENTS           Max events to fetch from Spond per run (default 250)
-  DRY_RUN              If set to "1", print planned changes without writing to Google Calendar
+  SPOND_GROUP_ID          Restrict to one Spond group (recommended; see list_groups.py)
+  SPOND_SUBGROUP_ID       Restrict further to one subgroup within that group
+  GOOGLE_DELEGATED_USER   A Workspace user email to impersonate via domain-wide
+                          delegation (e.g. the calendar's owner). If unset,
+                          falls back to plain ADC / calendar-sharing access.
+  GOOGLE_SERVICE_ACCOUNT_EMAIL  Required if GOOGLE_DELEGATED_USER is set -
+                          the service account's own email address.
+  LOOKBACK_DAYS           How many days into the past to reconcile (default 1)
+  LOOKAHEAD_DAYS          How many days into the future to reconcile (default 120)
+  EVENT_TIMEZONE          IANA timezone for events without one baked in (default Europe/Oslo)
+  MAX_EVENTS              Max events to fetch from Spond per run (default 250)
+  DRY_RUN                 If set to "1", print planned changes without writing to Google Calendar
 """
 
 from __future__ import annotations
@@ -42,9 +57,13 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import google.auth
+import google.auth.transport.requests
+import google.oauth2.credentials
+import requests
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -52,6 +71,7 @@ from spond import spond
 
 PRIVATE_KEY = "spondEventId"
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DWD_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 
 
 def env(name: str, default: str | None = None, required: bool = False) -> str | None:
@@ -159,12 +179,79 @@ def bodies_differ(existing: dict, desired: dict) -> bool:
     return False
 
 
+def get_domain_wide_delegated_credentials(
+    service_account_email: str, delegated_user: str
+) -> google.oauth2.credentials.Credentials:
+    """
+    Obtain an access token that acts as `delegated_user`, using domain-wide
+    delegation, without ever touching a service account key file.
+
+    This signs a JWT bearer assertion via the IAM Credentials API's signJwt
+    method (which uses Google's own copy of the key, not a downloaded one),
+    then exchanges that assertion for an OAuth access token. Requires:
+      - domain-wide delegation authorized for this service account's Client ID
+        in the Workspace Admin console, for the calendar.events scope
+      - the service account granted "Service Account Token Creator" on itself
+    """
+    base_credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    base_credentials.refresh(google.auth.transport.requests.Request())
+
+    now = int(time.time())
+    claims = {
+        "iss": service_account_email,
+        "sub": delegated_user,
+        "scope": DWD_SCOPE,
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now,
+        "exp": now + 3600,
+    }
+
+    sign_jwt_url = (
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+        f"{service_account_email}:signJwt"
+    )
+    import json as _json
+
+    sign_resp = requests.post(
+        sign_jwt_url,
+        headers={"Authorization": f"Bearer {base_credentials.token}"},
+        json={"payload": _json.dumps(claims)},
+        timeout=30,
+    )
+    if not sign_resp.ok:
+        raise RuntimeError(
+            "Failed to sign domain-wide delegation JWT "
+            f"({sign_resp.status_code}): {sign_resp.text}"
+        )
+    signed_jwt = sign_resp.json()["signedJwt"]
+
+    token_resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": signed_jwt,
+        },
+        timeout=30,
+    )
+    if not token_resp.ok:
+        raise RuntimeError(
+            "Failed to exchange domain-wide delegation JWT for an access "
+            f"token ({token_resp.status_code}): {token_resp.text}"
+        )
+    access_token = token_resp.json()["access_token"]
+    return google.oauth2.credentials.Credentials(token=access_token)
+
+
 def main() -> None:
     spond_username = env("SPOND_USERNAME", required=True)
     spond_password = env("SPOND_PASSWORD", required=True)
     group_id = env("SPOND_GROUP_ID")
     subgroup_id = env("SPOND_SUBGROUP_ID")
     calendar_id = env("GOOGLE_CALENDAR_ID", required=True)
+    delegated_user = env("GOOGLE_DELEGATED_USER")
+    service_account_email = env("GOOGLE_SERVICE_ACCOUNT_EMAIL")
     tz_name = env("EVENT_TIMEZONE", "Europe/Oslo")
     lookback_days = int(env("LOOKBACK_DAYS", "1"))
     lookahead_days = int(env("LOOKAHEAD_DAYS", "120"))
@@ -194,10 +281,25 @@ def main() -> None:
 
     active_spond_events = {e["id"]: e for e in spond_events if not is_cancelled(e)}
 
-    # Application Default Credentials: picks up the Workload Identity
-    # Federation credentials the auth step exports in CI, or whatever
-    # `gcloud auth application-default login` set up locally.
-    credentials, _ = google.auth.default(scopes=SCOPES)
+    if delegated_user:
+        if not service_account_email:
+            print(
+                "GOOGLE_DELEGATED_USER is set but GOOGLE_SERVICE_ACCOUNT_EMAIL "
+                "is missing.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Using domain-wide delegation, acting as {delegated_user} ...")
+        credentials = get_domain_wide_delegated_credentials(
+            service_account_email, delegated_user
+        )
+    else:
+        # Plain Application Default Credentials: picks up the Workload
+        # Identity Federation credentials the auth step exports in CI, or
+        # whatever `gcloud auth application-default login` set up locally.
+        # Requires the calendar to be directly shared with the service
+        # account with "Make changes to events" permission.
+        credentials, _ = google.auth.default(scopes=SCOPES)
 
     service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
 

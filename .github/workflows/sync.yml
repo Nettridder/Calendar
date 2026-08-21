@@ -40,5 +40,10 @@ jobs:
           SPOND_GROUP_ID: ${{ secrets.SPOND_GROUP_ID }}
           SPOND_SUBGROUP_ID: ${{ secrets.SPOND_SUBGROUP_ID }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          # Domain-wide delegation (recommended for a Workspace-owned calendar -
+          # bypasses external-sharing restrictions entirely). Leave both unset
+          # to fall back to plain calendar sharing instead.
+          GOOGLE_DELEGATED_USER: ${{ secrets.GOOGLE_DELEGATED_USER }}
+          GOOGLE_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
           EVENT_TIMEZONE: "Europe/Oslo"
         run: python sync.py
