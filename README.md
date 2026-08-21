@@ -5,6 +5,14 @@ schedule, using GitHub Actions. Once it's set up, nobody has to add anything
 by hand in either place: new Spond events appear in the Google Calendar
 within ~30 minutes, edits get updated, and cancelled events get removed.
 
+Also included: `.github/workflows/keepalive.yml`. GitHub automatically
+disables a repo's scheduled workflows after 60 days with no repository
+*commits* (running the sync every 30 minutes does not count as activity for
+that clock). This second workflow checks weekly and, if the repo has gone
+quiet for a while, makes one small heartbeat commit - so the 60-day clock
+never actually runs out and the sync keeps going indefinitely with no
+action needed from you.
+
 **Important honesty note before you set this up:** Spond has no official
 public API. This uses a well-maintained but *unofficial*, reverse-engineered
 Python client ([`spond`](https://pypi.org/project/spond/)) that logs in the

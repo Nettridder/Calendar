@@ -1,0 +1,51 @@
+name: Keepalive (prevent 60-day auto-disable)
+
+# GitHub automatically disables a repo's *scheduled* workflows once there
+# has been no repository activity (commits/pushes) for 60 days - and,
+# importantly, the sync workflow running every 30 minutes does NOT count as
+# "activity" for that clock; only real commits do. This workflow makes a
+# small, harmless commit well before that 60-day mark is ever reached, so
+# the sync keeps running indefinitely without anyone needing to notice or
+# act on anything.
+
+on:
+  schedule:
+    # Every Sunday at 03:00 UTC. Frequent enough that even in the worst
+    # case (a check right after the threshold was last crossed) there's
+    # still a large safety margin before the real 60-day cutoff.
+    - cron: "0 3 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Commit a heartbeat if the repo has been quiet for a while
+        run: |
+          set -e
+          LAST_COMMIT_EPOCH=$(git log -1 --format=%ct)
+          NOW_EPOCH=$(date -u +%s)
+          DAYS_SINCE=$(( (NOW_EPOCH - LAST_COMMIT_EPOCH) / 86400 ))
+          THRESHOLD_DAYS=40
+
+          echo "Days since last commit: $DAYS_SINCE (threshold: $THRESHOLD_DAYS)"
+
+          if [ "$DAYS_SINCE" -ge "$THRESHOLD_DAYS" ]; then
+            mkdir -p .github
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/.keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .github/.keepalive
+            git commit -m "chore: keepalive heartbeat (prevents 60-day auto-disable)"
+            git push
+            echo "Heartbeat committed."
+          else
+            echo "Repository already has recent activity; nothing to do."
+          fi
